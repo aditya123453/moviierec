@@ -363,6 +363,71 @@ def _set_rating(title: str, stars: int):
     st.session_state.profile["ratings"][title] = stars
     _save()
 
+def get_personalized_recs(profile: dict, top_n: int = 14) -> pd.DataFrame:
+    """
+    Build a personalised recommendation list from the user's profile.
+
+    Strategy
+    --------
+    1. Collect every title the user has interacted with (watchlist, diary,
+       rated movies, taste genre log).
+    2. Look those titles up in engine.movies_df to harvest their genre lists.
+    3. Combine with the taste log (which already tracks genre clicks).
+    4. Rank genres by frequency; take the top 3.
+    5. Filter engine.movies_df to those genres, exclude already-seen titles,
+       sort by weighted_score and return top_n rows.
+    """
+    try:
+        # ── 1. Collect all interacted titles ─────────────────────────────
+        wl_titles   = {m["title"] for m in profile.get("watchlist", [])}
+        diary_titles = {d["title"] for d in profile.get("diary", [])}
+        rated_titles = set(profile.get("ratings", {}).keys())
+        excluded     = wl_titles | diary_titles | rated_titles
+
+        if not excluded and not profile.get("taste"):
+            return pd.DataFrame()   # No history → nothing to personalise
+
+        # ── 2. Harvest genres from interacted movies in the DB ────────────
+        genre_counts: Dict[str, int] = {}
+
+        # Prefer highly-rated movies (4-5 stars) as stronger signal
+        high_rated = {
+            t for t, s in profile.get("ratings", {}).items() if s >= 4
+        }
+        for title in excluded:
+            weight = 3 if title in high_rated else 1
+            rows = engine.movies_df[engine.movies_df["title"] == title]
+            if rows.empty:
+                continue
+            genres = rows.iloc[0].get("genres", [])
+            if isinstance(genres, list):
+                for g in genres:
+                    genre_counts[str(g)] = genre_counts.get(str(g), 0) + weight
+
+        # ── 3. Blend with taste log (genre clicks / views) ────────────────
+        for g in profile.get("taste", []):
+            genre_counts[str(g)] = genre_counts.get(str(g), 0) + 1
+
+        if not genre_counts:
+            return pd.DataFrame()
+
+        # ── 4. Top-3 genres ───────────────────────────────────────────────
+        top_genres = sorted(genre_counts, key=genre_counts.get, reverse=True)[:3]
+
+        # ── 5. Filter DB, exclude seen, sort ─────────────────────────────
+        mask = engine.movies_df["genres"].apply(
+            lambda x: isinstance(x, list) and any(g in x for g in top_genres)
+        )
+        candidates = engine.movies_df[mask].copy()
+        candidates = candidates[~candidates["title"].isin(excluded)]
+        candidates = candidates.sort_values("weighted_score", ascending=False)
+        return candidates.head(top_n)
+
+    except Exception as e:
+        logger.error(f"Personalised recs error: {e}")
+        return pd.DataFrame()
+
+
 def scout_reply(text: str):
     words = set(text.lower().split())
     for kws, reply, genre in SCOUT_MAP:
@@ -1011,6 +1076,38 @@ elif st.session_state.active_mood and not st.session_state.viewing:
 # ── HOME PAGE ──────────────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════
 elif not st.session_state.viewing:
+
+    # ── 🎯 Recommended For You ────────────────────────────────────────────
+    if st.session_state.username and st.session_state.profile:
+        try:
+            pers_df = get_personalized_recs(st.session_state.profile)
+            if not pers_df.empty:
+                # Derive the top genres label for the subtitle
+                _p = st.session_state.profile
+                _gc: Dict[str, int] = {}
+                for _t in ({m["title"] for m in _p.get("watchlist", [])}
+                           | {d["title"] for d in _p.get("diary", [])}
+                           | set(_p.get("ratings", {}).keys())):
+                    _row = engine.movies_df[engine.movies_df["title"] == _t]
+                    if not _row.empty:
+                        for _g in (_row.iloc[0].get("genres", []) or []):
+                            _gc[str(_g)] = _gc.get(str(_g), 0) + 1
+                for _g in _p.get("taste", []):
+                    _gc[str(_g)] = _gc.get(str(_g), 0) + 1
+                _top3 = sorted(_gc, key=_gc.get, reverse=True)[:3]
+                _genre_label = " · ".join(_top3) if _top3 else "your taste"
+
+                st.markdown("---")
+                st.markdown(
+                    f'<div class="sec-hdr">'
+                    f'<span class="sec-title">🎯 Recommended For You</span>'
+                    f'<span class="sec-count">Based on {_genre_label}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                render_grid(pers_df, key_prefix="pers", cols=7, limit_key=None)
+        except Exception as _e:
+            logger.error(f"Personalised section error: {_e}")
 
     # ── Trending ──────────────────────────────────────────────────────────
     st.markdown("---")

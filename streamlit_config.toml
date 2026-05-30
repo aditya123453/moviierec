@@ -1,0 +1,31 @@
+# Streamlit Configuration
+# Place this in: .streamlit/config.toml
+
+[theme]
+primaryColor = "#e50914"
+backgroundColor = "#060d17"
+secondaryBackgroundColor = "#161c24"
+textColor = "#ffffff"
+font = "sans serif"
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"
+maxUploadSize = 200
+
+[logger]
+level = "info"
+
+[server]
+port = 8501
+headless = true
+runOnSave = true
+allowRunOnSave = true
+
+# Production settings
+[client]
+showErrorDetails = false
+
+[server]
+enableCORS = true
+enableXsrfProtection = true

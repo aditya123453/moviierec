@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  cinemagic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cinemagic-app
+    ports:
+      - "8501:8501"
+    environment:
+      - TMDB_API_KEY=${TMDB_API_KEY}
+      - API_TIMEOUT=5
+      - CACHE_TTL=86400
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./:/app
+      - streamlit_cache:/root/.streamlit/cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - cinemagic-network
+    labels:
+      - "com.cinemagic.description=Movie Recommendation Engine"
+
+  # Optional: PostgreSQL for user data (future enhancement)
+  postgres:
+    image: postgres:15-alpine
+    container_name: cinemagic-db
+    environment:
+      POSTGRES_DATABASE: cinemagic
+      POSTGRES_USER: ${DB_USER:-cinemagic_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - cinemagic-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-cinemagic_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - with-db  # Run with: docker-compose --profile with-db up
+
+volumes:
+  streamlit_cache:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  cinemagic-network:
+    driver: bridge

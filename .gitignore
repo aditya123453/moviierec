@@ -1,0 +1,22 @@
+# Large raw data files (not needed — pre-trained models are already pkl)
+tmdb_5000_movies.csv
+tmdb_5000_credits.csv
+similarity.pkl
+vectors.pkl
+movies_index.faiss
+
+# Streamlit secrets — NEVER commit this
+.streamlit/secrets.toml
+
+# User profile data (local only, not needed on Streamlit Cloud)
+profiles/
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.vscode/
+
+# Replit-specific (not needed on GitHub)
+.cache/
+.upm/

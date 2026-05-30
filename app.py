@@ -637,13 +637,16 @@ st.markdown('<div style="font-size:.65rem;color:#334;letter-spacing:2px;text-tra
 mcols = st.columns(len(MOODS))
 for mi, (mood_name, mood_genres) in enumerate(MOODS.items()):
     with mcols[mi]:
-        active = st.session_state.active_mood in mood_genres
+        if st.session_state.active_mood in MOODS:
+            active = st.session_state.active_mood == mood_name
+        else:
+            active = st.session_state.active_mood in mood_genres
         label  = f"✓ {mood_name}" if active else mood_name
         if st.button(label, key=f"mood_{mi}", use_container_width=True):
             if active:
                 st.session_state.active_mood = None
             else:
-                st.session_state.active_mood    = mood_genres[0]
+                st.session_state.active_mood    = mood_name
                 st.session_state.selected_movie = None
                 st.session_state.viewing        = None
                 st.session_state["lmt_mood"]    = 14
@@ -660,7 +663,8 @@ _from_session  = bool(selected_movie)
 
 with tab_db:
     if st.session_state.active_mood:
-        mood_matches = engine.filter_by_genres([st.session_state.active_mood])
+        genres_to_filter = MOODS.get(st.session_state.active_mood, [st.session_state.active_mood])
+        mood_matches = engine.filter_by_genres(genres_to_filter)
         if not mood_matches.empty:
             opts = ["— pick a movie —"] + list(mood_matches["title"].values)
             pick = st.selectbox(f"Movies tagged as **{st.session_state.active_mood}**:", opts, key="mood_sel")
@@ -966,7 +970,10 @@ elif selected_movie:
 # ═══════════════════════════════════════════════════════════════════════════
 elif st.session_state.active_mood and not st.session_state.viewing:
     genre = st.session_state.active_mood
-    mood_label = next((k for k, v in MOODS.items() if genre in v), genre)
+    if genre in MOODS:
+        mood_label = genre
+    else:
+        mood_label = next((k for k, v in MOODS.items() if genre in v), genre)
 
     st.markdown("---")
     try:

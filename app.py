@@ -428,6 +428,211 @@ def get_personalized_recs(profile: dict, top_n: int = 14) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+# ── Personalisation helpers (Features 1-6) ───────────────────────────────────
+
+def _build_genre_counts(profile: dict) -> Dict[str, int]:
+    """Shared genre-frequency map used by multiple features."""
+    gc: Dict[str, int] = {}
+    high_rated = {t for t, s in profile.get("ratings", {}).items() if s >= 4}
+    all_titles = (
+        {m["title"] for m in profile.get("watchlist", [])}
+        | {d["title"] for d in profile.get("diary", [])}
+        | set(profile.get("ratings", {}).keys())
+    )
+    for t in all_titles:
+        w = 3 if t in high_rated else 1
+        rows = engine.movies_df[engine.movies_df["title"] == t]
+        if rows.empty:
+            continue
+        for g in (rows.iloc[0].get("genres", []) or []):
+            gc[str(g)] = gc.get(str(g), 0) + w
+    for g in profile.get("taste", []):
+        gc[str(g)] = gc.get(str(g), 0) + 1
+    return gc
+
+
+def _compute_match_score(movie_genres: list, profile: dict, gc: Dict[str, int]) -> int:
+    """
+    Feature 1 — Match Score (60-99 %).
+    Blends three signals:
+      - Genre overlap  : fraction of this movie's genres in user's top genres
+      - Ratings signal : user has highly rated movies in these genres
+      - History depth  : how many of the movie's genres appear in taste log
+    Result is clamped to [60, 99].
+    """
+    if not gc or not isinstance(movie_genres, list) or not movie_genres:
+        return 62
+    total = max(sum(gc.values()), 1)
+    top_genres = set(sorted(gc, key=gc.get, reverse=True)[:5])
+    # Signal A: genre overlap weight
+    overlap = sum(gc.get(g, 0) for g in movie_genres if g in top_genres)
+    sig_a = min(overlap / total, 1.0)
+    # Signal B: high-rating affinity
+    high_genres = {t for t, s in profile.get("ratings", {}).items() if s >= 4}
+    sig_b = 0.0
+    for t in high_genres:
+        rows = engine.movies_df[engine.movies_df["title"] == t]
+        if not rows.empty:
+            hg = rows.iloc[0].get("genres", []) or []
+            if any(g in movie_genres for g in hg):
+                sig_b = min(sig_b + 0.15, 1.0)
+    # Signal C: taste depth
+    taste_hits = sum(1 for g in profile.get("taste", []) if g in movie_genres)
+    sig_c = min(taste_hits / max(len(profile.get("taste", [])), 1), 1.0)
+    raw = 0.5 * sig_a + 0.3 * sig_b + 0.2 * sig_c
+    score = int(60 + raw * 39)   # maps [0,1] → [60,99]
+    return max(60, min(99, score))
+
+
+def _because_you_liked(movie_genres: list, profile: dict, n: int = 2) -> List[str]:
+    """
+    Feature 2 — Because You Liked.
+    Returns up to n titles from the user's history whose genres overlap
+    most with the candidate movie's genres.
+    """
+    if not isinstance(movie_genres, list):
+        return []
+    genre_set = set(movie_genres)
+    candidates = []
+    sources = (
+        [(m["title"], 1) for m in profile.get("watchlist", [])]
+        + [(d["title"], 1) for d in profile.get("diary", [])]
+        + [(t, s) for t, s in profile.get("ratings", {}).items() if s >= 3]
+    )
+    seen_src: set = set()
+    for title, _score in sources:
+        if title in seen_src:
+            continue
+        seen_src.add(title)
+        rows = engine.movies_df[engine.movies_df["title"] == title]
+        if rows.empty:
+            continue
+        src_genres = set(rows.iloc[0].get("genres", []) or [])
+        overlap = len(genre_set & src_genres)
+        if overlap > 0:
+            candidates.append((overlap, title))
+    candidates.sort(reverse=True)
+    return [t for _, t in candidates[:n]]
+
+
+def _taste_profile_card_html(gc: Dict[str, int]) -> str:
+    """Feature 3 — Taste Profile card HTML."""
+    if not gc:
+        return ""
+    top3 = sorted(gc, key=gc.get, reverse=True)[:3]
+    items = "".join(
+        f'<div style="font-size:.74rem;color:#ccd8e4;padding:3px 0;">'
+        f'<span style="color:#e50914;margin-right:6px;">▸</span>{g}</div>'
+        for g in top3
+    )
+    sources_used = []
+    if gc:  # always true here, but be explicit
+        sources_used.append("Taste log")
+    sources_html = "".join(
+        f'<span style="font-size:.64rem;color:#334;margin-right:8px;">• {s}</span>'
+        for s in ["Watchlist", "Ratings", "Film Diary"]
+    )
+    return (
+        '<div style="background:#0c0f12;border:1px solid #1e2830;border-radius:8px;'
+        'padding:14px 16px;height:100%;">'
+        '<div style="font-size:.72rem;font-weight:700;color:#e50914;letter-spacing:1px;'
+        'text-transform:uppercase;margin-bottom:10px;">🎭 Your Taste Profile</div>'
+        '<div style="font-size:.64rem;color:#334;margin-bottom:6px;font-weight:600;'
+        'letter-spacing:.5px;text-transform:uppercase;">Favorite Genres</div>'
+        + items +
+        '<div style="margin-top:10px;border-top:1px solid #1a2230;padding-top:8px;">'
+        '<div style="font-size:.62rem;color:#334;margin-bottom:4px;">Based on</div>'
+        + sources_html +
+        '</div></div>'
+    )
+
+
+def _stats_card_html(profile: dict, fav_genre: str) -> str:
+    """Feature 4 — Movie Stats card HTML."""
+    wl  = len(profile.get("watchlist", []))
+    rat = len(profile.get("ratings", {}))
+    log = len(profile.get("diary", []))
+    stat_row = lambda lbl, val: (
+        f'<div style="display:flex;justify-content:space-between;'
+        f'padding:4px 0;border-bottom:1px solid #1a2230;">'
+        f'<span style="font-size:.72rem;color:#556677;">{lbl}</span>'
+        f'<span style="font-size:.72rem;font-weight:700;color:#e9c46a;">{val}</span></div>'
+    )
+    return (
+        '<div style="background:#0c0f12;border:1px solid #1e2830;border-radius:8px;'
+        'padding:14px 16px;height:100%;">'
+        '<div style="font-size:.72rem;font-weight:700;color:#e50914;letter-spacing:1px;'
+        'text-transform:uppercase;margin-bottom:10px;">📊 Your Movie Stats</div>'
+        + stat_row("Movies in Watchlist", wl)
+        + stat_row("Movies Rated", rat)
+        + stat_row("Movies Logged", log)
+        + stat_row("Favorite Genre", fav_genre or "—")
+        + '</div>'
+    )
+
+
+def _badges_html(profile: dict, gc: Dict[str, int]) -> str:
+    """Feature 5 — Achievement Badges."""
+    BADGE_RULES = [
+        ("🏆 Sci-Fi Fan",        ["Science Fiction", "Fantasy"],     3),
+        ("🏆 Action Lover",      ["Action", "Adventure"],             3),
+        ("🏆 Thriller Expert",   ["Thriller", "Crime", "Mystery"],    3),
+        ("🏆 Drama Enthusiast",  ["Drama", "Romance"],                3),
+        ("🏆 Movie Explorer",    [],                                   5),  # total interactions
+    ]
+    total_interactions = (
+        len(profile.get("watchlist", []))
+        + len(profile.get("ratings", {}))
+        + len(profile.get("diary", []))
+    )
+    earned = []
+    for badge, genres, threshold in BADGE_RULES:
+        if not genres:
+            if total_interactions >= threshold:
+                earned.append(badge)
+        else:
+            score = sum(gc.get(g, 0) for g in genres)
+            if score >= threshold:
+                earned.append(badge)
+    if not earned:
+        return ""
+    pills = "".join(
+        f'<span style="display:inline-block;background:rgba(229,9,20,.1);'
+        f'border:1px solid rgba(229,9,20,.3);border-radius:20px;'
+        f'padding:3px 10px;font-size:.68rem;font-weight:600;color:#e50914;'
+        f'margin:3px 4px 3px 0;">{b}</span>'
+        for b in earned
+    )
+    return (
+        '<div style="background:#0c0f12;border:1px solid #1e2830;border-radius:8px;'
+        'padding:14px 16px;height:100%;">'
+        '<div style="font-size:.72rem;font-weight:700;color:#e50914;letter-spacing:1px;'
+        'text-transform:uppercase;margin-bottom:10px;">🏅 Achievements</div>'
+        + pills +
+        '</div>'
+    )
+
+
+def _rec_explanation_html() -> str:
+    """Feature 6 — Recommendation Explanation blurb."""
+    points = [
+        "Matches your favorite genres",
+        "Similar to highly rated movies in your history",
+        "Fits your overall viewing taste",
+    ]
+    items = "".join(
+        f'<div style="font-size:.7rem;color:#556677;padding:2px 0;">'
+        f'<span style="color:#e50914;margin-right:5px;">✓</span>{p}</div>'
+        for p in points
+    )
+    return (
+        '<div style="background:#0c151d;border-left:3px solid #e50914;'
+        'border-radius:0 6px 6px 0;padding:8px 12px;margin-top:6px;">'
+        '<div style="font-size:.68rem;font-weight:700;color:#fff;margin-bottom:5px;">'
+        'Why Recommended</div>'
+        + items + '</div>'
+    )
+
 def scout_reply(text: str):
     words = set(text.lower().split())
     for kws, reply, genre in SCOUT_MAP:
@@ -1077,25 +1282,35 @@ elif st.session_state.active_mood and not st.session_state.viewing:
 # ═══════════════════════════════════════════════════════════════════════════
 elif not st.session_state.viewing:
 
-    # ── 🎯 Recommended For You ────────────────────────────────────────────
+    # ── 🎯 Recommended For You + Taste Profile + Stats + Badges ─────────────
     if st.session_state.username and st.session_state.profile:
         try:
-            pers_df = get_personalized_recs(st.session_state.profile)
+            _p = st.session_state.profile
+            pers_df = get_personalized_recs(_p)
+
+            # Build shared genre-count map once
+            _gc = _build_genre_counts(_p)
+            _top3_genres = sorted(_gc, key=_gc.get, reverse=True)[:3]
+            _fav_genre = _top3_genres[0] if _top3_genres else ""
+
+            # ── Taste Profile · Stats · Badges row ────────────────────────
+            _taste_html  = _taste_profile_card_html(_gc)
+            _stats_html  = _stats_card_html(_p, _fav_genre)
+            _badges_h    = _badges_html(_p, _gc)
+
+            if _taste_html or _stats_html or _badges_h:
+                st.markdown("---")
+                tc1, tc2, tc3 = st.columns(3)
+                if _taste_html:
+                    tc1.markdown(_taste_html, unsafe_allow_html=True)
+                if _stats_html:
+                    tc2.markdown(_stats_html, unsafe_allow_html=True)
+                if _badges_h:
+                    tc3.markdown(_badges_h, unsafe_allow_html=True)
+
+            # ── Recommended For You grid ───────────────────────────────────
             if not pers_df.empty:
-                # Derive the top genres label for the subtitle
-                _p = st.session_state.profile
-                _gc: Dict[str, int] = {}
-                for _t in ({m["title"] for m in _p.get("watchlist", [])}
-                           | {d["title"] for d in _p.get("diary", [])}
-                           | set(_p.get("ratings", {}).keys())):
-                    _row = engine.movies_df[engine.movies_df["title"] == _t]
-                    if not _row.empty:
-                        for _g in (_row.iloc[0].get("genres", []) or []):
-                            _gc[str(_g)] = _gc.get(str(_g), 0) + 1
-                for _g in _p.get("taste", []):
-                    _gc[str(_g)] = _gc.get(str(_g), 0) + 1
-                _top3 = sorted(_gc, key=_gc.get, reverse=True)[:3]
-                _genre_label = " · ".join(_top3) if _top3 else "your taste"
+                _genre_label = " · ".join(_top3_genres) if _top3_genres else "your taste"
 
                 st.markdown("---")
                 st.markdown(
@@ -1105,7 +1320,82 @@ elif not st.session_state.viewing:
                     f'</div>',
                     unsafe_allow_html=True,
                 )
-                render_grid(pers_df, key_prefix="pers", cols=7, limit_key=None)
+
+                # Explanation blurb (Feature 6)
+                st.markdown(_rec_explanation_html(), unsafe_allow_html=True)
+
+                # Render each movie with Match Score + Because You Liked
+                items = list(pers_df.itertuples(index=False))
+                cols_per_row = 7
+                for row_start in range(0, len(items), cols_per_row):
+                    chunk = items[row_start:row_start + cols_per_row]
+                    columns = st.columns(cols_per_row)
+                    for ci, row in enumerate(chunk):
+                        i = row_start + ci
+                        with columns[ci]:
+                            mid    = int(getattr(row, "movie_id", 0))
+                            title  = str(getattr(row, "title", ""))
+                            rating = getattr(row, "vote_average", "N/A")
+                            poster = _poster(mid)
+                            genres = getattr(row, "genres", []) or []
+                            seen   = any(d["title"] == title
+                                         for d in _p.get("diary", []))
+
+                            # Film card
+                            st.markdown(
+                                _film_card_html(title, poster, rating, seen=seen),
+                                unsafe_allow_html=True,
+                            )
+
+                            # Feature 1: Match Score
+                            match_pct = _compute_match_score(genres, _p, _gc)
+                            st.markdown(
+                                f'<div style="font-size:.62rem;font-weight:700;'
+                                f'color:#e9c46a;margin-top:2px;">'
+                                f'⭐ Match: {match_pct}%</div>',
+                                unsafe_allow_html=True,
+                            )
+
+                            # Feature 2: Because You Liked
+                            byl = _because_you_liked(genres, _p)
+                            if byl:
+                                byl_items = "".join(
+                                    f'<div style="font-size:.58rem;color:#445;'
+                                    f'white-space:nowrap;overflow:hidden;'
+                                    f'text-overflow:ellipsis;">• {format_movie_title(t, 16)}</div>'
+                                    for t in byl
+                                )
+                                st.markdown(
+                                    f'<div style="margin-top:2px;">'
+                                    f'<div style="font-size:.58rem;color:#334;'
+                                    f'font-weight:600;margin-bottom:1px;">Because you liked</div>'
+                                    + byl_items + '</div>',
+                                    unsafe_allow_html=True,
+                                )
+
+                            # Three action buttons
+                            c1, c2, c3 = st.columns(3)
+                            with c1:
+                                if st.button("📖", key=f"pers_d{i}",
+                                             help="Details", use_container_width=True):
+                                    st.session_state.viewing = {"title": title, "movie_id": mid}
+                                    st.session_state.selected_movie = None
+                                    st.rerun()
+                            with c2:
+                                if st.button("🎬", key=f"pers_r{i}",
+                                             help="Recommendations", use_container_width=True):
+                                    st.session_state.selected_movie = title
+                                    st.session_state.viewing = None
+                                    st.session_state.search_mode = "db"
+                                    st.rerun()
+                            with c3:
+                                in_wl = _in_watchlist(title)
+                                if st.button("✓" if in_wl else "❤",
+                                             key=f"pers_w{i}",
+                                             help="Watchlist", use_container_width=True):
+                                    _toggle_watchlist(title, poster)
+                                    st.rerun()
+
         except Exception as _e:
             logger.error(f"Personalised section error: {_e}")
 

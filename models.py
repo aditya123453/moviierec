@@ -7,7 +7,7 @@ import pickle
 import pandas as pd
 import numpy as np
 import logging
-import faiss
+from sklearn.neighbors import NearestNeighbors
 from typing import Optional, List, Tuple
 from config import MODEL_PATHS
 
@@ -40,8 +40,13 @@ class RecommendationEngine:
             norms = np.linalg.norm(self.vectors, axis=1, keepdims=True)
             self.vectors = self.vectors / (norms + 1e-8)
             
-            # Load pre-trained FAISS index from disk
-            self.nn_model = faiss.read_index("movies_index.faiss")
+            # Build and fit NearestNeighbors model dynamically
+            self.nn_model = NearestNeighbors(
+                metric="cosine",
+                algorithm="brute",
+                n_neighbors=31
+            )
+            self.nn_model.fit(self.vectors)
             
             logger.info("✅ Models loaded successfully")
         except FileNotFoundError as e:
@@ -94,7 +99,7 @@ class RecommendationEngine:
             
             # Find nearest neighbors
             n_neighbors = max(top_n + 1, 31)
-            distances, indices = self.nn_model.search(query_vec, n_neighbors)
+            distances, indices = self.nn_model.kneighbors(query_vec, n_neighbors=n_neighbors)
             movie_indices = indices[0][1:]  # Exclude self
             
             # Get recommendations and sort by weighted score
@@ -123,7 +128,7 @@ class RecommendationEngine:
             new_vec = new_vec / (norms + 1e-8)
             
             n_neighbors = max(top_n, 30)
-            distances, indices = self.nn_model.search(new_vec, n_neighbors)
+            distances, indices = self.nn_model.kneighbors(new_vec, n_neighbors=n_neighbors)
             movie_indices = indices[0]
             
             recommendations = self.movies_df.iloc[movie_indices].copy()

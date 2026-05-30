@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Profiles directory ──────────────────────────────────────────────────────
-PROFILES_DIR = "profiles"
+PROFILES_DIR = "data"
 os.makedirs(PROFILES_DIR, exist_ok=True)
 
 def _profile_path(username: str) -> str:

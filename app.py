@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Profiles directory ──────────────────────────────────────────────────────
-PROFILES_DIR = "data"
+PROFILES_DIR = "profiles"
 os.makedirs(PROFILES_DIR, exist_ok=True)
 
 def _profile_path(username: str) -> str:
@@ -216,6 +216,15 @@ _DEFAULTS = {
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v if not isinstance(_v, (list, dict)) else type(_v)()
+
+# ── Auto-restore session from query params (survives page refresh) ───────────
+_qp_user = st.query_params.get("user", "")
+if _qp_user and not st.session_state.username:
+    _restored = load_profile(_qp_user)
+    # Only restore if the profile file actually exists on disk
+    if os.path.exists(_profile_path(_qp_user)):
+        st.session_state.username = _qp_user
+        st.session_state.profile  = _restored
 
 # ── Load engine ─────────────────────────────────────────────────────────────
 try:
@@ -458,6 +467,11 @@ with st.sidebar:
                 if uname.strip():
                     st.session_state.username = uname.strip()
                     st.session_state.profile  = load_profile(uname.strip())
+                    # Persist username in URL so profile survives refresh
+                    st.query_params["user"] = uname.strip()
+                    # Create profile file immediately if it doesn't exist
+                    if not os.path.exists(_profile_path(uname.strip())):
+                        save_profile(uname.strip(), st.session_state.profile)
                     st.rerun()
         st.caption("Your watchlist, ratings & taste are saved under your profile.")
     else:
@@ -508,6 +522,8 @@ with st.sidebar:
             if st.button("Switch User", use_container_width=True, key="sw_user"):
                 st.session_state.username = ""
                 st.session_state.profile  = {}
+                # Remove username from URL so refresh doesn't auto-login
+                st.query_params.clear()
                 st.rerun()
         with sd:
             if st.button("🎲 Random", use_container_width=True, key="rand_sb"):
